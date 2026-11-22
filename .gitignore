@@ -1,0 +1,5 @@
+# Output folders and audio
+out/
+OUT*/
+*.wav
+__pycache__/
