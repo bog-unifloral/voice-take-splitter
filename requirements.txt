@@ -1,5 +1,4 @@
 numpy
 soundfile
-# optional, for --transcribe
 pocketsphinx
 rapidfuzz
