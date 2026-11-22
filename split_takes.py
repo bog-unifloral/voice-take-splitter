@@ -7,12 +7,16 @@ A recording session gives long files. Each file holds a spoken slate
 
   1. Finds each read in each recording (silence detection that adapts to
      the noise floor of each file).
-  2. Identifies which script line each recording is, with no help:
+  2. Reads the script: the same PDF the actors got (one page per character,
+     a table with #, LINE and FILE NAME), or a CSV.
+     Identifies which script line each recording is, with no help:
        - it listens to the slate ("line five") with a recognizer that only
          knows the words "line" and numbers, and
        - it transcribes the reads and compares them to the script text, and
        - it follows the script order through the session, so a "line one"
-         after the last Witch line is taken as the first Crow line.
+         after the last Witch line is taken as the first Crow line, and
+       - it works out which characters are in the session, and listens
+         to the slates again using only their line numbers.
   3. Writes each read as its own .wav, named
          <Character>_L<line>_Take<nn>_Try<n>.wav
      in the original sample rate and bit depth.
@@ -25,16 +29,16 @@ The original recordings are never changed.
 
 ------------------------------------------------------------------------
 INSTALL (Python 3.9 or later)
-    pip install numpy soundfile pocketsphinx rapidfuzz
+    pip install numpy soundfile pocketsphinx rapidfuzz pdfplumber
 
 EASIEST: run with no arguments (or double-click run_windows.bat / run_mac.command)
     python split_takes.py
-A small window opens. Pick the recordings folder, the script file and an
-output folder, then press Split. Later, press Make Final folder.
+A small window opens. Pick the recordings folder, the script (PDF or CSV)
+and an output folder, then press Split. Later, press Make Final folder.
 
 COMMAND LINE
   Split (identify lines automatically from the script):
-    python split_takes.py RECORDINGS_FOLDER OUT_FOLDER --script script.csv
+    python split_takes.py RECORDINGS_FOLDER OUT_FOLDER --script All_actors_lines.pdf
 
   Bulk: a parent folder with one subfolder per actor or session, or
   several folders. Output keeps one folder per session.
@@ -44,7 +48,11 @@ COMMAND LINE
   Copy the keepers (rows with keep = yes / x / 1 in manifest.csv):
     python split_takes.py final OUT_FOLDER
 
-SCRIPT FILE (script.csv, in the order the actors read it)
+SCRIPT AS PDF: the tool reads each page's title as the character name and the
+table columns #, LINE and FILE NAME. Lines that say N/A are skipped. File
+names with a wrong or missing extension (.waw, ,wav, none) get ".wav".
+
+SCRIPT AS CSV (in the order the actors read it)
     character,line,text,filename,mode
     Witch,1,"You will not leave this forest.",A_Witch_Warning_1.wav,
     Witch,3,"Long ago I lived in a village... (a long monologue)",A_Witch_Memory.wav,whole
@@ -52,8 +60,8 @@ SCRIPT FILE (script.csv, in the order the actors read it)
   mode (optional): split = one file per read (default)
                    whole = keep the take in one piece (monologues)
                    sounds = keep every sound (non-speech lines)
-  If mode is empty: text in [brackets] -> sounds, more than 40 words ->
-  whole, everything else -> split.
+  If mode is empty (always, for a PDF): text in [brackets] or of 3 words or
+  fewer -> sounds; more than 40 words or with // marks -> whole; else split.
 
 OPTIONAL MAPPING FILE (to override the automatic identification)
     source,character,line,mode
@@ -162,12 +170,19 @@ class Listener:
     def __init__(self, max_line):
         from pocketsphinx import Decoder
         self.general = Decoder(samprate=16000)
-        words = " | ".join(number_words(n) for n in range(1, max(max_line, 1) + 1))
-        self._gram = tempfile.NamedTemporaryFile("w", suffix=".gram", delete=False)
-        self._gram.write(f"#JSGF V1.0;\ngrammar slate;\npublic <s> = [line] ({words});\n")
-        self._gram.close()
-        self.slater = Decoder(samprate=16000, jsgf=self._gram.name)
-        self.lookup = {number_words(n): n for n in range(1, max(max_line, 1) + 1)}
+        self.set_range(max_line)
+
+    def set_range(self, max_line):
+        """Slate recognizer that knows only 'line' and the numbers 1..max_line."""
+        from pocketsphinx import Decoder
+        max_line = max(max_line, 1)
+        words = " | ".join(number_words(n) for n in range(1, max_line + 1))
+        gram = tempfile.NamedTemporaryFile("w", suffix=".gram", delete=False)
+        gram.write(f"#JSGF V1.0;\ngrammar slate;\npublic <s> = [line] ({words});\n")
+        gram.close()
+        self.slater = Decoder(samprate=16000, jsgf=gram.name)
+        self.lookup = {number_words(n): n for n in range(1, max_line + 1)}
+        self.max_line = max_line
 
     @staticmethod
     def _run(dec, pcm):
@@ -182,11 +197,14 @@ class Listener:
     def text(self, x, sr, start, end):
         return self._run(self.general, pcm16k(x, sr, start, end))
 
-    def slate(self, x, sr, seg):
-        """Line number spoken at the start of the take, or None."""
+    @staticmethod
+    def slate_audio(x, sr, seg):
         start, end = seg
-        heard = self._run(self.slater, pcm16k(x, sr, max(0, start - 0.15), min(end + 0.15, start + 1.8)))
-        heard = heard.replace("line", "").strip()
+        return pcm16k(x, sr, max(0, start - 0.15), min(end + 0.15, start + 1.8))
+
+    def slate(self, pcm):
+        """Line number spoken at the start of the take, or None."""
+        heard = self._run(self.slater, pcm).replace("line", "").strip()
         return self.lookup.get(heard)
 
 
@@ -220,12 +238,20 @@ def identify(takes, script):
     for b in reversed(back):
         path.append(int(b[path[-1]]))
     path.reverse()
+    # Characters in this session: those the path uses for 3 or more takes
+    # (or every character used, for very short sessions).
+    from collections import Counter
+    used = Counter(script[s]["character"] for s in path)
+    cast = {c for c, n in used.items() if n >= 3} or set(used)
+    in_cast = np.array([script[s]["character"] in cast for s in range(S)])
     out = []
     for t, s in enumerate(path):
-        top = E[t].max()
-        sure = E[t, s] >= top - 0.3 and top > 0.4
+        top = E[t][in_cast].max()  # compare only with lines of the session's characters
+        sure = E[t, s] >= top - 0.3 and E[t, s] > 0.4
         if takes[t]["slate"] is not None and takes[t]["slate"] != script[s]["line_no"]:
             sure = False  # the slate said another line number
+        if script[s]["character"] not in cast:
+            sure = False  # a character that is almost absent from this session
         out.append((s, sure))
     return out
 
@@ -235,9 +261,78 @@ def safe(name):
     return re.sub(r"[^A-Za-z0-9]+", "", name or "")
 
 
+def read_pdf_script(path):
+    """Script rows from a voice-actor PDF: one page (or more) per character,
+    a title with the character name, and a table with #, LINE and FILE NAME."""
+    import pdfplumber
+    rows, character = [], None
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words(keep_blank_chars=False, use_text_flow=False, extra_attrs=["size"])
+            if not words:
+                continue
+            hdr_hash = next((w for w in words if w["text"] == "#"), None)
+            hdr_line = next((w for w in words if w["text"] == "LINE"), None)
+            hdr_file = next((w for w in words if w["text"] == "FILE"), None)
+            if not (hdr_hash and hdr_line and hdr_file):
+                continue
+            title = [w for w in words if w["bottom"] <= hdr_hash["top"] - 2]
+            if title:  # largest text above the table header is the character name
+                big = max(w["size"] for w in title)
+                top = min(w["top"] for w in title if abs(w["size"] - big) < 0.5)
+                name = " ".join(w["text"] for w in sorted(title, key=lambda w: w["x0"])
+                                if abs(w["size"] - big) < 0.5 and abs(w["top"] - top) < 3)
+                character = name or character
+            x_line, x_file = hdr_line["x0"] - 2, hdr_file["x0"] - 2
+            body = [w for w in words if w["top"] > hdr_hash["bottom"] + 1]
+            footer_y = max((w["top"] for w in body if w["text"] == "Page"), default=None)
+            if footer_y is not None:
+                body = [w for w in body if w["top"] < footer_y - 2]
+            # Each row starts at its number; a word belongs to the last row that
+            # starts at or above it (with 4 pt tolerance for cells set a bit higher).
+            starts = sorted((w["top"], int(w["text"])) for w in body
+                            if w["x0"] < x_line and re.fullmatch(r"\d+", w["text"]))
+            page_rows = [{"character": character, "line": n, "text": [], "file": []} for _, n in starts]
+            rows.extend(page_rows)
+            for w in body:
+                if w["x0"] < x_line or not starts:
+                    continue
+                idx = None
+                for k, (top, _) in enumerate(starts):
+                    if w["top"] >= top - 4:
+                        idx = k
+                if idx is not None:
+                    r = page_rows[idx]
+                    (r["file"] if w["x0"] >= x_file else r["text"]).append(w)
+    out = []
+    for r in rows:
+        text = " ".join(w["text"] for w in sorted(r["text"], key=lambda w: (round(w["top"]), w["x0"])))
+        fname = "".join(w["text"] for w in sorted(r["file"], key=lambda w: (round(w["top"]), w["x0"])))
+        text = text.strip().strip('"').strip()
+        if not text or text.upper() in ("N/A", "NA", "-"):
+            continue
+        out.append({"character": r["character"], "line": str(r["line"]), "text": text, "filename": fname, "mode": ""})
+    return out
+
+
+def fix_wav_name(name):
+    """Normalise the extension: 'x.waw', 'x,wav' and 'x' all become 'x.wav'."""
+    name = (name or "").strip()
+    if not name:
+        return name, False
+    fixed = re.sub(r"[.,]?(wav|waw|wv|wa)$", "", name, flags=re.I) + ".wav"
+    return fixed, fixed != name
+
+
 def load_script(path):
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        rows = [r for r in csv.DictReader(f) if (r.get("character") or "").strip()]
+    path = Path(path)
+    if path.suffix.lower() == ".pdf":
+        rows = read_pdf_script(path)
+    else:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            rows = [r for r in csv.DictReader(f) if (r.get("character") or "").strip()]
+    if not rows:
+        raise SystemExit(f"No script lines found in {path.name}.")
     for r in rows:
         r["character"] = r["character"].strip()
         r["line_no"] = int(str(r["line"]).strip())
@@ -246,12 +341,14 @@ def load_script(path):
         if not mode:
             if re.fullmatch(r"\[.*\]", text.strip('"')):
                 mode = "sounds"
-            elif len(text.split()) > 40:
+            elif len(text.split()) > 40 or "//" in text:
                 mode = "whole"
+            elif len(text.split()) <= 3:
+                mode = "sounds"  # very short lines and noises: keep every sound
             else:
                 mode = "split"
         r["mode"] = mode
-        r["filename"] = (r.get("filename") or "").strip()
+        r["filename"], r["name_fixed"] = fix_wav_name(r.get("filename"))
     return rows
 
 
@@ -301,7 +398,8 @@ def split(sources, out, script_path=None, mapping_path=None, min_gap=0.6, thresh
         segs = find_segments(x, sr, min_gap, threshold)
         tk = {"session": session, "rel": rel, "file": f, "segs": segs, "slate": None, "texts": []}
         if segs and listener:
-            tk["slate"] = listener.slate(x, sr, segs[0])
+            tk["slate_pcm"] = listener.slate_audio(x, sr, segs[0])
+            tk["slate"] = listener.slate(tk["slate_pcm"])
             long_segs = [s for s in segs if s[1] - s[0] > 1.0] or segs
             tk["texts"] = [listener.text(x, sr, s, e) for s, e in long_segs[:4]]
         takes.append(tk)
@@ -311,8 +409,26 @@ def split(sources, out, script_path=None, mapping_path=None, min_gap=0.6, thresh
     for session in dict.fromkeys(t["session"] for t in takes):
         group = [t for t in takes if t["session"] == session and t["segs"]]
         if script and group:
-            for tk, (idx, sure) in zip(group, identify(group, script)):
-                tk["row"], tk["sure"] = script[idx], sure
+            result = identify(group, script)
+            # Listen to the slates again, knowing only the line numbers of the
+            # characters in this session (fewer numbers, fewer mistakes).
+            from collections import Counter
+            used = Counter(script[i]["character"] for i, _ in result)
+            cast = {c for c, n in used.items() if n >= 3} or set(used)
+            cast_rows = [r for r in script if r["character"] in cast]
+            if len(cast_rows) < len(script):
+                top_line = max(r["line_no"] for r in cast_rows)
+                if top_line < listener.max_line:
+                    listener.set_range(top_line)
+                    for tk in group:
+                        tk["slate"] = listener.slate(tk["slate_pcm"])
+                    listener.set_range(max(r["line_no"] for r in script))
+                result = identify(group, cast_rows)
+                log("characters in " + session + ": " + ", ".join(sorted(cast)))
+            else:
+                cast_rows = script
+            for tk, (idx, sure) in zip(group, result):
+                tk["row"], tk["sure"] = cast_rows[idx], sure
 
     # Pass 3: apply mapping overrides, cut and write.
     rows, take_no, written = [], {}, 0
@@ -327,6 +443,8 @@ def split(sources, out, script_path=None, mapping_path=None, min_gap=0.6, thresh
         line = str(row["line_no"]) if row else ""
         mode = row["mode"] if row else "split"
         final = row["filename"] if row else ""
+        if row and row.get("name_fixed") and not note:
+            note = "file name extension fixed from script"
         m = mapping.get(rel) or mapping.get(f"{session}/{rel}") or mapping.get(f.name)
         if m is not None:
             character, line = (m.get("character") or "").strip(), str(m.get("line") or "").strip()
@@ -430,12 +548,12 @@ def gui():
 
     def pick(var, kind):
         p = (filedialog.askdirectory() if kind == "dir"
-             else filedialog.askopenfilename(filetypes=[("CSV", "*.csv"), ("All files", "*.*")]))
+             else filedialog.askopenfilename(filetypes=[("Script", "*.pdf *.csv"), ("All files", "*.*")]))
         if p:
             var.set(p)
 
     for r, (lab, var, kind) in enumerate([("Recordings folder", rec, "dir"),
-                                          ("Script (.csv)", scr, "file"),
+                                          ("Script (.pdf or .csv)", scr, "file"),
                                           ("Output folder", outv, "dir")]):
         tk.Label(root, text=lab).grid(row=r, column=0, sticky="w", padx=8, pady=4)
         tk.Entry(root, textvariable=var, width=60).grid(row=r, column=1, padx=4)
@@ -477,7 +595,8 @@ def gui():
                tk.Button(root, text="2. Make Final folder", width=22, command=do_final)]
     buttons[0].grid(row=3, column=1, sticky="w", padx=4)
     buttons[1].grid(row=3, column=1, sticky="e", padx=4)
-    log("1. Pick the folder with the session's .wav files, the script .csv and an output folder.\n"
+    log("1. Pick the folder with the session's .wav files, the script (the actors' PDF, or a .csv)\n"
+        "   and an output folder.\n"
         "2. Press 'Split and name'. Then open manifest.csv in the output folder and type 'yes'\n"
         "   in the keep column for each take you want.\n"
         "3. Press 'Make Final folder'. The keepers are copied there with the game's file names.\n")
@@ -494,7 +613,7 @@ def main():
         return finalize(sys.argv[2])
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("inputs", type=Path, nargs="+", help="input folder(s) or .wav files, then the output folder")
-    p.add_argument("--script", type=Path, help="script CSV: character,line,text,filename[,mode]")
+    p.add_argument("--script", type=Path, help="the actors' script PDF, or a CSV: character,line,text,filename[,mode]")
     p.add_argument("--mapping", type=Path, help="optional CSV to override identification")
     p.add_argument("--min-gap", type=float, default=0.6)
     p.add_argument("--threshold", type=float, default=0.3)
