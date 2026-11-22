@@ -7,7 +7,7 @@ All speech recognition runs offline on your computer. The tool does not change t
 ## What you need
 
 - The session folder with the `.wav` recordings.
-- The script as a `.csv` file (see [The script file](#the-script-file)). You can make it in Excel with **File > Save As > CSV**.
+- The script: the same **PDF the actors got** (one page per character, with a table of `#`, `LINE` and `FILE NAME`), or a `.csv` file (see [The script file](#the-script-file)).
 - Python 3.9 or later, from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH** during setup.
 
 ## Use it (no typing)
@@ -16,7 +16,7 @@ All speech recognition runs offline on your computer. The tool does not change t
 2. Double-click **`run_windows.bat`** (Windows) or **`run_mac.command`** (Mac). The first time, it installs the packages it needs. This takes about a minute.
 3. In the window, pick:
    - **Recordings folder**: the folder with the session's `.wav` files. It can also be a folder with one subfolder for each actor.
-   - **Script (.csv)**: the script file.
+   - **Script (.pdf or .csv)**: the actors' script PDF.
    - **Output folder**: an empty folder for the results.
 4. Click **1. Split and name**. A session of about 50 recordings takes 2 to 3 minutes.
 5. Open `manifest.csv` in the output folder. Each row is one read. Listen to the files and type `yes` in the **keep** column for the best take of each line. Start with the rows that have **check** in the **note** column: the tool was not sure about them.
@@ -25,10 +25,11 @@ All speech recognition runs offline on your computer. The tool does not change t
 ## What the tool does
 
 1. **Finds the reads.** It measures the loudness of each recording and sets a silence level for that file, so it works in quiet and in noisy rooms.
-2. **Identifies the line.** It uses three clues:
+2. **Identifies the line.** It reads the script and uses these clues:
    - the slate ("line five"), with a recognizer that knows only the word "line" and numbers,
    - a transcript of the reads, compared to the script text,
-   - the script order: takes usually follow the script, so a "line one" after the last Witch line is the first Crow line.
+   - the script order: takes usually follow the script, so a "line one" after the last Witch line is the first Crow line,
+   - the cast: it finds which characters are in the session, then listens to the slates again with only their line numbers.
 3. **Cuts and names.** It removes the slate, joins two parts of one read that a pause split, and removes short stray sounds. Each read becomes one file:
 
    ```
@@ -36,11 +37,13 @@ All speech recognition runs offline on your computer. The tool does not change t
    ```
 4. **Writes `manifest.csv`.** One row for each file: source recording, start time, length, final file name, keep, and note.
 
-In a test on one real session (50 recordings, two characters, slates in most takes), the tool identified 48 recordings correctly. It marked the other 2 as **check**. Results change with each session, so listen before you choose.
+In a test on one real session (50 recordings, two characters, slates in most takes), with the full 5-character script PDF, the tool found the two characters and identified 48 recordings correctly. It marked the other 2 as **check**, together with 8 correct recordings it was less sure of. Results change with each session, so listen before you choose.
 
 ## The script file
 
-One row for each line, **in the order the actor reads them**:
+**PDF (easiest).** Use the PDF the actors got. The tool reads the title of each page as the character name, and the table columns `#`, `LINE` and `FILE NAME`. A character can continue on the next page. Lines that say `N/A` are skipped. File names with a wrong or missing extension (`.waw`, `,wav`, none) get `.wav`, and the manifest notes this.
+
+**CSV (for other script layouts).** One row for each line, **in the order the actor reads them**:
 
 | column | meaning |
 |---|---|
@@ -50,7 +53,7 @@ One row for each line, **in the order the actor reads them**:
 | `filename` | the file name the game uses |
 | `mode` | optional: `split` (one file for each read), `whole` (keep the take in one piece, for monologues), `sounds` (keep each sound, for animal sounds and similar) |
 
-If `mode` is empty: text in `[brackets]` becomes `sounds`, text of more than 40 words becomes `whole`, and all other text becomes `split`. See `example_script.csv`.
+If `mode` is empty (always for a PDF): text in `[brackets]` or of 3 words or fewer becomes `sounds`, text of more than 40 words or with `//` marks becomes `whole`, and all other text becomes `split`. See `example_script.csv`.
 
 ## Correct a wrong match
 
@@ -65,7 +68,7 @@ Track 1_001.wav,,,              <- empty character: skip this file
 ## Command line
 
 ```
-python split_takes.py RECORDINGS OUT --script script.csv              # split and name
+python split_takes.py RECORDINGS OUT --script All_actors_lines.pdf    # split and name
 python split_takes.py SESSIONS OUT --script script.csv                # one subfolder for each actor
 python split_takes.py ActorA/Raw ActorB/Raw OUT --script script.csv   # several folders
 python split_takes.py RECORDINGS OUT --script script.csv --mapping mapping.csv
