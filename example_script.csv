@@ -1,0 +1,6 @@
+character,line,text,filename
+Witch,1,"You will not leave this forest.",A_Witch_Warning_1.wav
+Witch,2,"Bring me the lantern, child.",A_Witch_Request_1.wav
+Witch,3,"Long ago I lived in a village by the river. (monologue)",A_Witch_Memory.wav
+Crow,1,"[single caw]",A_Crow_Caw.wav
+Crow,2,"Thank you, traveler.",A_Crow_Thanks.wav
