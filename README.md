@@ -1,78 +1,76 @@
 # voice-take-splitter
 
-A Python script that splits voice-actor recordings into one file per read.
+A tool for voice-over sessions. It cuts each recording into one file per read, finds which script line each recording is, and names the files. You then choose the best take of each line, and the tool copies those takes into a `Final` folder with the file names the game uses.
 
-Voice-over sessions often give long files. Each file has a spoken slate ("line one") and then several reads of the same line. This script finds each read, removes the slate, and writes each read to its own `.wav` file with a clear name:
+All speech recognition runs offline on your computer. The tool does not change the original recordings.
 
-```
-Witch_L01_Take02_Try3.wav   ->  character Witch, script line 1, 2nd recording of that line, 3rd read in it
-```
+## What you need
 
-It also writes `manifest.csv`. The manifest has one row per output file: the source recording, the start time, the length, the final script file name, and an empty `keep` column for the review.
+- The session folder with the `.wav` recordings.
+- The script as a `.csv` file (see [The script file](#the-script-file)). You can make it in Excel with **File > Save As > CSV**.
+- Python 3.9 or later, from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH** during setup.
 
-The script does not change the original recordings.
+## Use it (no typing)
 
-## How it works
+1. Download this repository: **Code > Download ZIP**, then unzip it.
+2. Double-click **`run_windows.bat`** (Windows) or **`run_mac.command`** (Mac). The first time, it installs the packages it needs. This takes about a minute.
+3. In the window, pick:
+   - **Recordings folder**: the folder with the session's `.wav` files. It can also be a folder with one subfolder for each actor.
+   - **Script (.csv)**: the script file.
+   - **Output folder**: an empty folder for the results.
+4. Click **1. Split and name**. A session of about 50 recordings takes 2 to 3 minutes.
+5. Open `manifest.csv` in the output folder. Each row is one read. Listen to the files and type `yes` in the **keep** column for the best take of each line. Start with the rows that have **check** in the **note** column: the tool was not sure about them.
+6. Click **2. Make Final folder**. The tool copies each keeper into `Final` and gives it the file name from the script.
 
-1. **Find the reads.** The script measures the loudness of each file in 20 ms steps. It sets a threshold from the noise floor of that file, so it works in quiet and in noisy rooms. A silence longer than `--min-gap` separates two reads.
-2. **Remove the slate.** A short sound at the start of the file is the slate. The script removes it.
-3. **Clean up.** The script joins two parts of one read that a pause split. It removes short stray sounds between reads (for example "okay" or a breath).
-4. **Write the files.** The script keeps the original sample rate and bit depth. It keeps a short margin of room tone before and after each read.
+## What the tool does
 
-## Install
+1. **Finds the reads.** It measures the loudness of each recording and sets a silence level for that file, so it works in quiet and in noisy rooms.
+2. **Identifies the line.** It uses three clues:
+   - the slate ("line five"), with a recognizer that knows only the word "line" and numbers,
+   - a transcript of the reads, compared to the script text,
+   - the script order: takes usually follow the script, so a "line one" after the last Witch line is the first Crow line.
+3. **Cuts and names.** It removes the slate, joins two parts of one read that a pause split, and removes short stray sounds. Each read becomes one file:
 
-Python 3.9 or later.
+   ```
+   Witch_L03_Take02_Try1.wav  =  Witch, script line 3, 2nd recording of that line, 1st read in it
+   ```
+4. **Writes `manifest.csv`.** One row for each file: source recording, start time, length, final file name, keep, and note.
 
-```
-pip install numpy soundfile
-pip install pocketsphinx rapidfuzz     # optional, only for --transcribe
-```
+In a test on one real session (50 recordings, two characters, slates in most takes), the tool identified 48 recordings correctly. It marked the other 2 as **check**. Results change with each session, so listen before you choose.
 
-## Use
+## The script file
 
-**One session, with a mapping file (most reliable):**
+One row for each line, **in the order the actor reads them**:
 
-```
-python split_takes.py RAW_FOLDER OUT_FOLDER --mapping mapping.csv --script script.csv
-```
-
-**Bulk.** Give one parent folder with one subfolder for each actor or session, or give several folders. The output has one folder for each session.
-
-```
-python split_takes.py Sessions OUT_FOLDER --mapping mapping.csv
-python split_takes.py ActorA/Raw ActorB/Raw OUT_FOLDER --mapping mapping.csv
-```
-
-**Identify the lines automatically.** The script transcribes each recording offline and matches it to the nearest script line. The result is a first pass, so check the `note` column in the manifest.
-
-```
-python split_takes.py RAW_FOLDER OUT_FOLDER --script script.csv --transcribe
-```
-
-**No mapping and no script.** The files get the names `<source>_Try<n>.wav`.
-
-## Input files
-
-See `example_mapping.csv` and `example_script.csv`.
-
-`mapping.csv` tells the script what each recording contains:
-
-| column | value |
+| column | meaning |
 |---|---|
-| `source` | file name of the recording (in bulk runs, use the path from the input folder if two sessions have the same file names) |
-| `character` | character name; leave empty to skip the file |
-| `line` | script line number |
-| `mode` | `split` (default): one file for each read. `whole`: keep the recording in one piece, for monologues. `sounds`: keep each sound, for non-speech lines such as animal sounds |
+| `character` | character name |
+| `line` | line number (the number the actor says in the slate) |
+| `text` | the words of the line |
+| `filename` | the file name the game uses |
+| `mode` | optional: `split` (one file for each read), `whole` (keep the take in one piece, for monologues), `sounds` (keep each sound, for animal sounds and similar) |
 
-`script.csv` gives the script:
+If `mode` is empty: text in `[brackets]` becomes `sounds`, text of more than 40 words becomes `whole`, and all other text becomes `split`. See `example_script.csv`.
 
-| column | value |
-|---|---|
-| `character`, `line` | same as in the mapping |
-| `text` | the line, used by `--transcribe` |
-| `filename` | the final name for the game, written to the manifest |
+## Correct a wrong match
 
-## Settings
+If the tool puts a recording on the wrong line, make a `mapping.csv` with only that recording, and run the split again with `--mapping mapping.csv`:
+
+```
+source,character,line,mode
+Track 2_015.wav,Witch,2,split
+Track 1_001.wav,,,              <- empty character: skip this file
+```
+
+## Command line
+
+```
+python split_takes.py RECORDINGS OUT --script script.csv              # split and name
+python split_takes.py SESSIONS OUT --script script.csv                # one subfolder for each actor
+python split_takes.py ActorA/Raw ActorB/Raw OUT --script script.csv   # several folders
+python split_takes.py RECORDINGS OUT --script script.csv --mapping mapping.csv
+python split_takes.py final OUT                                       # copy the keepers
+```
 
 | option | default | meaning |
 |---|---|---|
@@ -82,7 +80,14 @@ See `example_mapping.csv` and `example_script.csv`.
 | `--tail` | 0.35 | seconds kept after each read |
 | `--keep-slate` | off | do not remove the slate |
 
+## Tips for the recording session
+
+- Ask the actor to say "line" and the number before each line, in the same numbers as the script.
+- Record the lines in script order when you can.
+- Leave about one second of silence between reads.
+
 ## Limits
 
-- Listen to the output before you choose takes. The script finds reads by sound level, not by meaning. Sometimes it splits one read with a long pause, or keeps two fast reads in one file. Change `--min-gap` for that session, or cut the file by hand.
-- `--transcribe` uses PocketSphinx, a small offline recognizer. It identifies most speech lines but it is not accurate. A mapping file is more reliable.
+- The tool finds reads by sound level. Sometimes it splits one read at a long pause, or keeps two fast reads in one file. Change `--min-gap`, or cut that file by hand.
+- Lines with only animal sounds or noises are hard to identify when they are recorded out of order. The tool marks them **check**.
+- PocketSphinx is a small offline recognizer. It is good enough to match lines to a known script. Do not use it for accurate transcripts.
